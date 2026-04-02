@@ -1,0 +1,57 @@
+# ── Python ────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# ── Virtual environments ──────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.env
+
+# ── Distribution / packaging ──────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+
+# ── Installer logs ────────────────────────────────────
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ── Unit test / coverage ──────────────────────────────
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+*.cover
+
+# ── Scraper config & output ───────────────────────────
+# Uncomment the line below if you do NOT want to commit
+# your personal scraper config to the repo
+# ~/.philosophize_scraper.json is outside the repo anyway,
+# but if you ever store a local copy here:
+scraper_config.json
+
+# Scraped transcript output (these are personal/local files)
+*.md
+# Re-include the README and LICENSE docs
+!README.md
+
+# ── IDEs & editors ────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Logs ──────────────────────────────────────────────
+*.log
+logs/

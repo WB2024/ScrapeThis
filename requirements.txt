@@ -1,0 +1,4 @@
+requests==2.32.3
+beautifulsoup4==4.13.4
+markdownify==0.14.1
+rich==14.0.0

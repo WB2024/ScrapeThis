@@ -218,9 +218,10 @@ def main_menu(config: dict) -> str:
     table.add_row("[cyan]1[/cyan]", "Scrape new transcripts")
     table.add_row("[cyan]2[/cyan]", "Settings / change save path")
     table.add_row("[cyan]3[/cyan]", "Show scraped files")
-    table.add_row("[cyan]4[/cyan]", "Exit")
+    table.add_row("[cyan]4[/cyan]", "Search transcripts by keyword")
+    table.add_row("[cyan]5[/cyan]", "Exit")
     console.print(table)
-    return Prompt.ask("Choose", choices=["1", "2", "3", "4"], default="1")
+    return Prompt.ask("Choose", choices=["1", "2", "3", "4", "5"], default="1")
 
 
 def show_scraped_files(config: dict):
@@ -231,6 +232,67 @@ def show_scraped_files(config: dict):
     console.print(f"\n[bold]Scraped transcripts ({len(scraped)}):[/bold]")
     for i, slug in enumerate(scraped, 1):
         console.print(f"  [dim]{i:>3}.[/dim] {slug}")
+
+
+def search_transcripts(config: dict):
+    """Keyword search across all scraped .md files, ranked by mention count."""
+    save_path = Path(config.get("save_path", ""))
+    if not save_path or not save_path.exists():
+        console.print("[red]Save path not configured or does not exist.[/red]")
+        return
+
+    keyword = Prompt.ask("\n[bold]Enter keyword to search[/bold]").strip()
+    if not keyword:
+        console.print("[yellow]No keyword entered.[/yellow]")
+        return
+
+    md_files = list(save_path.glob("*.md"))
+    if not md_files:
+        console.print("[yellow]No scraped transcripts found in save path.[/yellow]")
+        return
+
+    console.print(
+        f"\n[cyan]Searching [bold]{len(md_files)}[/bold] file(s) "
+        f"for '[bold]{keyword}[/bold]'…[/cyan]\n"
+    )
+
+    pattern = re.compile(re.escape(keyword), re.IGNORECASE)
+    results = []
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("[cyan]Scanning files...", total=len(md_files))
+        for md_file in md_files:
+            try:
+                text = md_file.read_text(encoding="utf-8")
+                count = len(pattern.findall(text))
+                if count > 0:
+                    results.append({"file": md_file.stem, "count": count})
+            except IOError:
+                pass
+            progress.advance(task)
+
+    if not results:
+        console.print(f"[yellow]No transcripts found containing '{keyword}'.[/yellow]")
+        return
+
+    results.sort(key=lambda x: x["count"], reverse=True)
+
+    console.print(
+        f"\n[bold green]'{keyword}' found in {len(results)} transcript(s):[/bold green]\n"
+    )
+    table = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 2))
+    table.add_column("#", style="dim", width=4)
+    table.add_column("Episode", style="cyan")
+    table.add_column("Mentions", justify="right", style="bold yellow")
+    for i, r in enumerate(results, 1):
+        table.add_row(str(i), r["file"], str(r["count"]))
+    console.print(table)
 
 
 def run_scrape(config: dict) -> dict:
@@ -336,6 +398,8 @@ def main():
         elif choice == "3":
             show_scraped_files(config)
         elif choice == "4":
+            search_transcripts(config)
+        elif choice == "5":
             console.print("[dim]Goodbye![/dim]")
             sys.exit(0)
 

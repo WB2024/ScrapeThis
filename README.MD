@@ -87,11 +87,34 @@ Main Menu
 | **1** | Crawl the index, find new transcripts, download & convert them |
 | **2** | Change save path or clear scrape history |
 | **3** | List all previously scraped episode slugs |
-| **4** | Exit the program |
+| **4** | Search all scraped transcripts for a keyword |
+| **5** | Exit the program |
 
 ---
 
-## 📁 Output Format
+## � Keyword Search
+
+Option **4** in the main menu lets you search all previously scraped transcripts for any keyword or phrase.
+
+1. Select **4 – Search transcripts by keyword** from the main menu
+2. Enter a keyword (e.g. `Plato`, `stoicism`, `free will`)
+3. Every `.md` file in your save directory is scanned for that term (case-insensitive)
+4. Results are displayed in a table sorted by **mention count**, highest first:
+
+```
+'Plato' found in 12 transcript(s):
+
+  #   Episode                                       Mentions
+  1   episode-047-transcript                              38
+  2   episode-012-transcript                              21
+  ...
+```
+
+Episodes with zero mentions are excluded from the results.
+
+---
+
+## �📁 Output Format
 
 Each transcript is saved as an individual Markdown file named after the episode slug:
 

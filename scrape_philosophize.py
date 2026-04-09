@@ -11,10 +11,12 @@ A TUI-driven scraper for https://www.philosophizethis.org/transcript
 import json
 import os
 import re
+import shutil
 import time
 import sys
 import webbrowser
 from pathlib import Path
+from html import unescape as html_unescape
 
 import requests
 from bs4 import BeautifulSoup
@@ -53,7 +55,7 @@ def load_config() -> dict:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
             pass
-    return {"save_path": None, "scraped": []}
+    return {"save_path": None, "scraped": [], "audio_path": None, "downloaded_audio": []}
 
 
 def save_config(config: dict) -> None:
@@ -164,14 +166,19 @@ def slugify_filename(slug: str) -> str:
 
 
 def slugify_title(title: str) -> str:
-    """Convert a podcast episode title into a safe ASCII filename."""
+    """Convert a podcast episode title into a safe ASCII .md filename."""
+    return slugify_title_stem(title) + ".md"
+
+
+def slugify_title_stem(title: str) -> str:
+    """Convert a podcast episode title into a safe ASCII base name (no extension)."""
     slug = title.lower()
     slug = slug.encode("ascii", errors="ignore").decode("ascii")
     slug = re.sub(r"[^\w\s-]", " ", slug)
     slug = re.sub(r"[\s_]+", "-", slug.strip())
     slug = re.sub(r"-+", "-", slug)
     slug = slug.strip("-")
-    return slug + ".md"
+    return slug
 
 
 # ── Podcast map helpers ───────────────────────────────────────────────────────
@@ -220,7 +227,7 @@ def get_all_podcast_page_urls() -> list[str]:
 def build_podcast_map(podcast_urls: list[str]) -> dict[str, dict]:
     """
     Fetch each podcast audio page and return a reverse map of
-    {transcript_slug: {"podcast_url": ..., "episode_title": ...}}.
+    {transcript_slug: {"podcast_url": ..., "episode_title": ..., "audio_download_url": ...}}.
     """
     mapping: dict[str, dict] = {}
     eta_mins = round(len(podcast_urls) * REQUEST_DELAY / 60, 1)
@@ -244,7 +251,18 @@ def build_podcast_map(podcast_urls: list[str]) -> dict[str, dict]:
                     slug = href.rstrip("/").split("/")[-1]
                     h1 = soup.find("h1", class_=re.compile(r"entry-title"))
                     episode_title = h1.get_text(strip=True) if h1 else slug
-                    mapping[slug] = {"podcast_url": url, "episode_title": episode_title}
+
+                    # Extract audio download URL
+                    audio_url = ""
+                    dl_link = soup.find("a", attrs={"aria-label": "Download episode"})
+                    if dl_link and dl_link.get("href"):
+                        audio_url = html_unescape(dl_link["href"])
+
+                    mapping[slug] = {
+                        "podcast_url": url,
+                        "episode_title": episode_title,
+                        "audio_download_url": audio_url,
+                    }
             progress.advance(task)
             time.sleep(REQUEST_DELAY)
 
@@ -312,6 +330,154 @@ def enrich_file_with_podcast_url(filepath: Path, podcast_url: str, episode_title
         return new_filepath
     except IOError:
         return None
+
+
+def download_audio_file(url: str, dest: Path) -> bool:
+    """Stream-download an audio file. Returns True on success."""
+    try:
+        with requests.get(url, headers=HEADERS, stream=True, timeout=60) as r:
+            r.raise_for_status()
+            with open(dest, "wb") as f:
+                shutil.copyfileobj(r.raw, f)
+        return True
+    except requests.RequestException as e:
+        console.print(f"[red]  Download failed: {e}[/red]")
+        return False
+
+
+def enrich_file_with_audio_path(filepath: Path, audio_filepath: Path) -> bool:
+    """Add an audio_file: field to frontmatter and a local listen link in the body."""
+    try:
+        content = filepath.read_text(encoding="utf-8")
+    except IOError:
+        return False
+
+    if "audio_file:" in content:
+        return True  # already done
+
+    audio_rel = audio_filepath.name
+
+    # Insert audio_file before scraped_at in frontmatter
+    content = content.replace(
+        "\nscraped_at:",
+        f'\naudio_file: "{audio_rel}"\nscraped_at:',
+        1,
+    )
+
+    # Insert a local listen link after the podcast listen link (or after heading)
+    if "[🎧 **Listen to episode**]" in content:
+        content = content.replace(
+            "[🎧 **Listen to episode**]",
+            f"[🎧 **Listen to episode**]",
+            1,
+        )
+        # Insert after that whole line
+        content = re.sub(
+            r"(\[🎧 \*\*Listen to episode\*\*\]\([^\)]+\))\n",
+            rf"\1\n\n[💾 **Play local audio**]({audio_rel})\n",
+            content,
+            count=1,
+        )
+    else:
+        # Insert after the first heading
+        content = re.sub(
+            r"^(# .+\n)\n",
+            rf"\1\n[💾 **Play local audio**]({audio_rel})\n\n",
+            content,
+            count=1,
+            flags=re.MULTILINE,
+        )
+
+    try:
+        filepath.write_text(content, encoding="utf-8")
+        return True
+    except IOError:
+        return False
+
+
+def run_download_audio(config: dict) -> dict:
+    """Download all podcast audio files using the podcast map."""
+    # Ensure audio path is set
+    if not config.get("audio_path"):
+        console.print("\n[bold yellow]Audio save path not set. Let's configure it.[/bold yellow]")
+        config["audio_path"] = prompt_for_path(label="audio")
+        save_config(config)
+
+    audio_path = Path(config["audio_path"])
+    audio_path.mkdir(parents=True, exist_ok=True)
+
+    save_path = Path(config.get("save_path", ""))
+
+    console.print("\n[bold cyan]Step 1/3:[/bold cyan] Fetching podcast index…")
+    podcast_urls = get_all_podcast_page_urls()
+
+    if not podcast_urls:
+        console.print("[red]No podcast pages found. Check your connection.[/red]")
+        return config
+
+    console.print(f"[green]Found {len(podcast_urls)} podcast pages.[/green]")
+    console.print(f"\n[bold cyan]Step 2/3:[/bold cyan] Building podcast map…")
+    podcast_map = build_podcast_map(podcast_urls)
+    console.print(f"[green]Mapped {len(podcast_map)} episodes.[/green]")
+
+    already_downloaded: set = set(config.get("downloaded_audio", []))
+    to_download = [
+        (slug, info)
+        for slug, info in podcast_map.items()
+        if info.get("audio_download_url") and slug not in already_downloaded
+    ]
+
+    console.print(
+        f"\n[green]{len(podcast_map)} episodes with audio.[/green] "
+        f"[yellow]{len(to_download)} new to download.[/yellow]"
+    )
+
+    if not to_download:
+        console.print("[bold green]✓ All audio files up to date![/bold green]")
+        return config
+
+    console.print(f"\n[bold cyan]Step 3/3:[/bold cyan] Downloading {len(to_download)} audio file(s)…\n")
+
+    failed: list[str] = []
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("[cyan]Downloading...", total=len(to_download))
+
+        for slug, info in to_download:
+            title = info["episode_title"]
+            audio_url = info["audio_download_url"]
+            filename = slugify_title_stem(title) + ".mp3"
+            dest = audio_path / filename
+
+            progress.update(task, description=f"[cyan]{filename}")
+
+            if download_audio_file(audio_url, dest):
+                config.setdefault("downloaded_audio", []).append(slug)
+                save_config(config)
+
+                # If transcript .md exists, enrich it with audio_file link
+                if save_path and save_path.exists():
+                    md_name = slugify_title(title)
+                    md_path = save_path / md_name
+                    if md_path.exists():
+                        enrich_file_with_audio_path(md_path, dest)
+            else:
+                failed.append(slug)
+
+            progress.advance(task)
+            time.sleep(REQUEST_DELAY)
+
+    newly_done = len(to_download) - len(failed)
+    console.print(f"\n[bold green]✓ Downloaded {newly_done} audio file(s)[/bold green] → {audio_path}")
+    if failed:
+        console.print(f"[yellow]Failed ({len(failed)}): {', '.join(failed)}[/yellow]")
+
+    return config
 
 
 def run_enrichment(config: dict) -> dict:
@@ -429,19 +595,19 @@ def print_header():
     )
 
 
-def prompt_for_path(current: str | None = None) -> str:
+def prompt_for_path(current: str | None = None, label: str = "transcripts") -> str:
     if current:
-        console.print(f"\n[dim]Current save path:[/dim] [green]{current}[/green]")
+        console.print(f"\n[dim]Current {label} path:[/dim] [green]{current}[/green]")
 
     while True:
         raw = Prompt.ask(
-            "\n[bold]Enter the directory path to save transcripts[/bold]",
-            default=current or str(Path.home() / "philosophize_transcripts"),
+            f"\n[bold]Enter the directory path to save {label}[/bold]",
+            default=current or str(Path.home() / f"philosophize_{label}"),
         )
         path = Path(raw).expanduser().resolve()
         try:
             path.mkdir(parents=True, exist_ok=True)
-            console.print(f"[green]✓ Save path set to:[/green] {path}")
+            console.print(f"[green]✓ {label.capitalize()} path set to:[/green] {path}")
             return str(path)
         except Exception as e:
             console.print(f"[red]Could not create directory: {e}[/red]")
@@ -449,23 +615,33 @@ def prompt_for_path(current: str | None = None) -> str:
 
 def show_settings_menu(config: dict) -> dict:
     console.print("\n[bold underline]Settings[/bold underline]")
-    console.print(f"  Save path : [green]{config.get('save_path', 'Not set')}[/green]")
-    console.print(f"  Scraped   : [cyan]{len(config.get('scraped', []))} transcripts[/cyan]")
+    console.print(f"  Transcript path : [green]{config.get('save_path', 'Not set')}[/green]")
+    console.print(f"  Audio path      : [green]{config.get('audio_path', 'Not set')}[/green]")
+    console.print(f"  Scraped         : [cyan]{len(config.get('scraped', []))} transcripts[/cyan]")
+    console.print(f"  Downloaded      : [cyan]{len(config.get('downloaded_audio', []))} audio files[/cyan]")
 
     choice = Prompt.ask(
         "\nWhat would you like to do?",
-        choices=["change_path", "clear_history", "back"],
+        choices=["change_transcript_path", "change_audio_path", "clear_history", "clear_audio_history", "back"],
         default="back",
     )
 
-    if choice == "change_path":
-        config["save_path"] = prompt_for_path(config.get("save_path"))
+    if choice == "change_transcript_path":
+        config["save_path"] = prompt_for_path(config.get("save_path"), label="transcripts")
+        save_config(config)
+    elif choice == "change_audio_path":
+        config["audio_path"] = prompt_for_path(config.get("audio_path"), label="audio")
         save_config(config)
     elif choice == "clear_history":
         if Confirm.ask("[yellow]Clear scrape history? (will re-scrape everything next run)[/yellow]"):
             config["scraped"] = []
             save_config(config)
-            console.print("[green]History cleared.[/green]")
+            console.print("[green]Transcript history cleared.[/green]")
+    elif choice == "clear_audio_history":
+        if Confirm.ask("[yellow]Clear audio download history? (will re-download everything next run)[/yellow]"):
+            config["downloaded_audio"] = []
+            save_config(config)
+            console.print("[green]Audio history cleared.[/green]")
 
     return config
 
@@ -478,9 +654,10 @@ def main_menu(config: dict) -> str:
     table.add_row("[cyan]3[/cyan]", "Show scraped files")
     table.add_row("[cyan]4[/cyan]", "Search transcripts by keyword")
     table.add_row("[cyan]5[/cyan]", "Enrich transcripts with podcast links")
-    table.add_row("[cyan]6[/cyan]", "Exit")
+    table.add_row("[cyan]6[/cyan]", "Download all audio files")
+    table.add_row("[cyan]7[/cyan]", "Exit")
     console.print(table)
-    return Prompt.ask("Choose", choices=["1", "2", "3", "4", "5", "6"], default="1")
+    return Prompt.ask("Choose", choices=["1", "2", "3", "4", "5", "6", "7"], default="1")
 
 
 def show_scraped_files(config: dict):
@@ -517,11 +694,20 @@ def view_transcript(filepath: Path) -> None:
         else "[dim]  No podcast audio link found for this episode.[/dim]"
     )
 
-    with console.pager(styles=True):
-        console.print(Rule("[bold magenta]Philosophize This! — Transcript Viewer[/bold magenta]"))
-        console.print(rendered)
-        console.print(Rule())
-        console.print(hint)
+    # Ensure 'less' (the default system pager) renders ANSI codes
+    prev_less = os.environ.get("LESS", "")
+    os.environ["LESS"] = "-R"
+    try:
+        with console.pager(styles=True):
+            console.print(Rule("[bold magenta]Philosophize This! — Transcript Viewer[/bold magenta]"))
+            console.print(rendered)
+            console.print(Rule())
+            console.print(hint)
+    finally:
+        if prev_less:
+            os.environ["LESS"] = prev_less
+        else:
+            os.environ.pop("LESS", None)
 
 
 def search_transcripts(config: dict):
@@ -602,14 +788,38 @@ def search_transcripts(config: dict):
         console.print(f"\n[bold]{chosen['file']}[/bold]")
         action = Prompt.ask(
             "What would you like to do?",
-            choices=["read", "listen", "back"],
+            choices=["read", "listen_local", "episode_page", "transcript_page", "back"],
             default="read",
         )
 
         if action == "read":
             view_transcript(chosen["path"])
-        elif action == "listen":
-            # Pull podcast_url from frontmatter of the file
+        elif action == "listen_local":
+            # Try to find a local audio file matching this transcript
+            try:
+                text = chosen["path"].read_text(encoding="utf-8")
+            except IOError:
+                console.print("[red]Could not read file.[/red]")
+                continue
+            m = re.search(r'^audio_file:\s*"([^"]+)"', text, re.MULTILINE)
+            audio_path = Path(config.get("audio_path", ""))
+            if m and m.group(1) and audio_path.exists():
+                local_file = audio_path / m.group(1)
+                if local_file.exists():
+                    console.print(f"[green]Opening local audio:[/green] {local_file}")
+                    webbrowser.open(f"file://{local_file}")
+                else:
+                    console.print(
+                        f"[yellow]Audio file not found at {local_file}.\n"
+                        "Run option 6 (Download audio) first.[/yellow]"
+                    )
+            else:
+                console.print(
+                    "[yellow]No local audio file linked for this transcript.\n"
+                    "Run option 6 (Download audio) first.[/yellow]"
+                )
+        elif action == "episode_page":
+            # Open podcast audio page in browser
             try:
                 text = chosen["path"].read_text(encoding="utf-8")
             except IOError:
@@ -618,13 +828,27 @@ def search_transcripts(config: dict):
             m = re.search(r'^podcast_url:\s*"([^"]+)"', text, re.MULTILINE)
             if m and m.group(1):
                 url = m.group(1)
-                console.print(f"[green]Opening in browser:[/green] {url}")
+                console.print(f"[green]Opening episode page:[/green] {url}")
                 webbrowser.open(url)
             else:
                 console.print(
-                    "[yellow]No podcast audio URL found for this transcript.\n"
-                    "Run option 5 (Enrich transcripts) to add podcast links.[/yellow]"
+                    "[yellow]No podcast page URL found for this transcript.\n"
+                    "Run option 5 (Enrich transcripts) first.[/yellow]"
                 )
+        elif action == "transcript_page":
+            # Open transcript page in browser
+            try:
+                text = chosen["path"].read_text(encoding="utf-8")
+            except IOError:
+                console.print("[red]Could not read file.[/red]")
+                continue
+            m = re.search(r'^source:\s*"([^"]+)"', text, re.MULTILINE)
+            if m and m.group(1):
+                url = m.group(1)
+                console.print(f"[green]Opening transcript page:[/green] {url}")
+                webbrowser.open(url)
+            else:
+                console.print("[yellow]No transcript source URL found in this file.[/yellow]")
         # "back" just loops back to the results table
 
 
@@ -735,6 +959,8 @@ def main():
         elif choice == "5":
             config = run_enrichment(config)
         elif choice == "6":
+            config = run_download_audio(config)
+        elif choice == "7":
             console.print("[dim]Goodbye![/dim]")
             sys.exit(0)
 

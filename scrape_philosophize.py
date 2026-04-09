@@ -21,6 +21,12 @@ from html import unescape as html_unescape
 import requests
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
+import markdown as markdown_lib
+from weasyprint import HTML as WeasyHTML
+
+import requests
+from bs4 import BeautifulSoup
+from markdownify import markdownify as md
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -28,6 +34,7 @@ from rich.prompt import Prompt, Confirm
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.rule import Rule
 from rich.table import Table
+from rich.text import Text
 from rich import print as rprint
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -55,7 +62,7 @@ def load_config() -> dict:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
             pass
-    return {"save_path": None, "scraped": [], "audio_path": None, "downloaded_audio": []}
+    return {"save_path": None, "scraped": [], "audio_path": None, "downloaded_audio": [], "pdf_path": None}
 
 
 def save_config(config: dict) -> None:
@@ -595,6 +602,108 @@ def run_enrichment(config: dict) -> dict:
     return config
 
 
+PDF_CSS = """\
+@page {
+    size: A4;
+    margin: 2.5cm 2cm;
+    @bottom-center { content: counter(page); font-size: 9pt; color: #888; }
+}
+body {
+    font-family: "DejaVu Serif", Georgia, "Times New Roman", serif;
+    font-size: 11pt;
+    line-height: 1.6;
+    color: #222;
+}
+h1 {
+    font-size: 20pt;
+    color: #333;
+    border-bottom: 1px solid #ccc;
+    padding-bottom: 6pt;
+    margin-bottom: 12pt;
+}
+h2 { font-size: 16pt; color: #444; margin-top: 18pt; }
+h3 { font-size: 13pt; color: #555; }
+a { color: #1a0dab; text-decoration: none; }
+blockquote {
+    border-left: 3px solid #ccc;
+    padding-left: 12pt;
+    color: #555;
+    font-style: italic;
+}
+code { font-family: monospace; background: #f4f4f4; padding: 1pt 3pt; }
+"""
+
+
+def run_generate_pdfs(config: dict) -> dict:
+    """Convert all scraped .md transcript files to PDF."""
+    save_path = Path(config.get("save_path", ""))
+    if not save_path or not save_path.exists():
+        console.print("[red]Transcript path not configured or does not exist.[/red]")
+        return config
+
+    if not config.get("pdf_path"):
+        console.print("\n[bold yellow]PDF save path not set. Let's configure it.[/bold yellow]")
+        config["pdf_path"] = prompt_for_path(label="PDFs")
+        save_config(config)
+
+    pdf_path = Path(config["pdf_path"])
+    pdf_path.mkdir(parents=True, exist_ok=True)
+
+    md_files = sorted(save_path.glob("*.md"))
+    if not md_files:
+        console.print("[yellow]No transcript .md files found.[/yellow]")
+        return config
+
+    # Only generate PDFs that don't already exist (incremental)
+    to_convert = []
+    for md_file in md_files:
+        pdf_name = md_file.stem + ".pdf"
+        if not (pdf_path / pdf_name).exists():
+            to_convert.append(md_file)
+
+    console.print(
+        f"\n[green]{len(md_files)} transcript(s) found.[/green] "
+        f"[yellow]{len(to_convert)} new PDF(s) to generate.[/yellow]"
+    )
+
+    if not to_convert:
+        console.print("[bold green]✓ All PDFs up to date![/bold green]")
+        return config
+
+    failed: list[str] = []
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("[cyan]Generating PDFs...", total=len(to_convert))
+
+        for md_file in to_convert:
+            progress.update(task, description=f"[cyan]{md_file.stem}")
+            try:
+                raw = md_file.read_text(encoding="utf-8")
+                # Strip YAML frontmatter
+                body = re.sub(r"^---\n.*?\n---\n\n?", "", raw, count=1, flags=re.DOTALL)
+                # Convert markdown to HTML
+                html_body = markdown_lib.markdown(body, extensions=["extra", "smarty"])
+                full_html = f"<html><head><style>{PDF_CSS}</style></head><body>{html_body}</body></html>"
+                pdf_dest = pdf_path / (md_file.stem + ".pdf")
+                WeasyHTML(string=full_html).write_pdf(str(pdf_dest))
+            except Exception as e:
+                console.print(f"[red]  Failed {md_file.stem}: {e}[/red]")
+                failed.append(md_file.stem)
+            progress.advance(task)
+
+    done = len(to_convert) - len(failed)
+    console.print(f"\n[bold green]✓ Generated {done} PDF(s)[/bold green] → {pdf_path}")
+    if failed:
+        console.print(f"[yellow]Failed ({len(failed)}): {', '.join(failed)}[/yellow]")
+
+    return config
+
+
 # ── TUI screens ───────────────────────────────────────────────────────────────
 
 def print_header():
@@ -631,12 +740,13 @@ def show_settings_menu(config: dict) -> dict:
     console.print("\n[bold underline]Settings[/bold underline]")
     console.print(f"  Transcript path : [green]{config.get('save_path', 'Not set')}[/green]")
     console.print(f"  Audio path      : [green]{config.get('audio_path', 'Not set')}[/green]")
+    console.print(f"  PDF path        : [green]{config.get('pdf_path', 'Not set')}[/green]")
     console.print(f"  Scraped         : [cyan]{len(config.get('scraped', []))} transcripts[/cyan]")
     console.print(f"  Downloaded      : [cyan]{len(config.get('downloaded_audio', []))} audio files[/cyan]")
 
     choice = Prompt.ask(
         "\nWhat would you like to do?",
-        choices=["change_transcript_path", "change_audio_path", "clear_history", "clear_audio_history", "back"],
+        choices=["change_transcript_path", "change_audio_path", "change_pdf_path", "clear_history", "clear_audio_history", "back"],
         default="back",
     )
 
@@ -645,6 +755,9 @@ def show_settings_menu(config: dict) -> dict:
         save_config(config)
     elif choice == "change_audio_path":
         config["audio_path"] = prompt_for_path(config.get("audio_path"), label="audio")
+        save_config(config)
+    elif choice == "change_pdf_path":
+        config["pdf_path"] = prompt_for_path(config.get("pdf_path"), label="PDFs")
         save_config(config)
     elif choice == "clear_history":
         if Confirm.ask("[yellow]Clear scrape history? (will re-scrape everything next run)[/yellow]"):
@@ -669,9 +782,10 @@ def main_menu(config: dict) -> str:
     table.add_row("[cyan]4[/cyan]", "Search transcripts by keyword")
     table.add_row("[cyan]5[/cyan]", "Enrich transcripts with podcast links")
     table.add_row("[cyan]6[/cyan]", "Download all audio files")
-    table.add_row("[cyan]7[/cyan]", "Exit")
+    table.add_row("[cyan]7[/cyan]", "Generate PDFs from transcripts")
+    table.add_row("[cyan]8[/cyan]", "Exit")
     console.print(table)
-    return Prompt.ask("Choose", choices=["1", "2", "3", "4", "5", "6", "7"], default="1")
+    return Prompt.ask("Choose", choices=["1", "2", "3", "4", "5", "6", "7", "8"], default="1")
 
 
 def show_scraped_files(config: dict):
@@ -684,8 +798,9 @@ def show_scraped_files(config: dict):
         console.print(f"  [dim]{i:>3}.[/dim] {slug}")
 
 
-def view_transcript(filepath: Path) -> None:
-    """Render a transcript .md file as formatted Markdown inside a Rich pager."""
+def view_transcript(filepath: Path, keyword: str | None = None) -> None:
+    """Render a transcript .md file as formatted Markdown inside a Rich pager.
+    If keyword is provided, highlight all occurrences."""
     try:
         raw = filepath.read_text(encoding="utf-8")
     except IOError as e:
@@ -701,12 +816,22 @@ def view_transcript(filepath: Path) -> None:
     if m:
         podcast_url = m.group(1)
 
-    rendered = Markdown(body, hyperlinks=True)
-
     hint = (
         f"[dim]  Listening link:[/dim] {podcast_url}" if podcast_url
         else "[dim]  No podcast audio link found for this episode.[/dim]"
     )
+
+    # Render markdown to a Text object so we can apply keyword highlighting
+    temp_console = Console(file=None, force_terminal=True, width=console.width)
+    with temp_console.capture() as capture:
+        temp_console.print(Markdown(body, hyperlinks=True))
+    rendered_text = Text.from_ansi(capture.get())
+
+    if keyword:
+        rendered_text.highlight_regex(
+            re.escape(keyword),
+            style="bold white on dark_green",
+        )
 
     # Ensure 'less' (the default system pager) renders ANSI codes
     prev_less = os.environ.get("LESS", "")
@@ -714,9 +839,11 @@ def view_transcript(filepath: Path) -> None:
     try:
         with console.pager(styles=True):
             console.print(Rule("[bold magenta]Philosophize This! — Transcript Viewer[/bold magenta]"))
-            console.print(rendered)
+            console.print(rendered_text)
             console.print(Rule())
             console.print(hint)
+            if keyword:
+                console.print(f"[dim]  Highlighted: '{keyword}'[/dim]")
     finally:
         if prev_less:
             os.environ["LESS"] = prev_less
@@ -807,7 +934,7 @@ def search_transcripts(config: dict):
         )
 
         if action == "read":
-            view_transcript(chosen["path"])
+            view_transcript(chosen["path"], keyword=keyword)
         elif action == "listen_local":
             # Try to find a local audio file matching this transcript
             try:
@@ -975,6 +1102,8 @@ def main():
         elif choice == "6":
             config = run_download_audio(config)
         elif choice == "7":
+            config = run_generate_pdfs(config)
+        elif choice == "8":
             console.print("[dim]Goodbye![/dim]")
             sys.exit(0)
 

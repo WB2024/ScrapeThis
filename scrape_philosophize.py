@@ -252,11 +252,14 @@ def build_podcast_map(podcast_urls: list[str]) -> dict[str, dict]:
                     h1 = soup.find("h1", class_=re.compile(r"entry-title"))
                     episode_title = h1.get_text(strip=True) if h1 else slug
 
-                    # Extract audio download URL
+                    # Extract audio download URL from embedded Megaphone player iframe
                     audio_url = ""
-                    dl_link = soup.find("a", attrs={"aria-label": "Download episode"})
-                    if dl_link and dl_link.get("href"):
-                        audio_url = html_unescape(dl_link["href"])
+                    iframe = soup.find("iframe", src=re.compile(r"megaphone\.fm"))
+                    if iframe:
+                        src = iframe.get("src", "")
+                        ep_match = re.search(r"[?&]e=([A-Za-z0-9]+)", src)
+                        if ep_match:
+                            audio_url = f"https://traffic.megaphone.fm/{ep_match.group(1)}.mp3"
 
                     mapping[slug] = {
                         "podcast_url": url,

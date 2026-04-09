@@ -34,7 +34,7 @@ from rich.table import Table
 from rich.text import Text
 from rich import print as rprint
 
-from audio_search import run_index_audio, run_search_audio, get_index_count
+from audio_search import run_index_audio, run_search_audio, get_index_count, choose_whisper_model, DEFAULT_WHISPER_MODEL
 
 # ── Constants ────────────────────────────────────────────────────────────────
 BASE_URL = "https://www.philosophizethis.org"
@@ -743,10 +743,11 @@ def show_settings_menu(config: dict) -> dict:
     console.print(f"  Scraped         : [cyan]{len(config.get('scraped', []))} transcripts[/cyan]")
     console.print(f"  Downloaded      : [cyan]{len(config.get('downloaded_audio', []))} audio files[/cyan]")
     console.print(f"  Audio index     : [cyan]{get_index_count(config.get('audio_path'))} files indexed[/cyan]")
+    console.print(f"  Whisper model   : [cyan]{config.get('whisper_model', DEFAULT_WHISPER_MODEL)}[/cyan]")
 
     choice = Prompt.ask(
         "\nWhat would you like to do?",
-        choices=["change_transcript_path", "change_audio_path", "change_pdf_path", "clear_history", "clear_audio_history", "back"],
+        choices=["change_transcript_path", "change_audio_path", "change_pdf_path", "change_whisper_model", "clear_history", "clear_audio_history", "back"],
         default="back",
     )
 
@@ -758,6 +759,9 @@ def show_settings_menu(config: dict) -> dict:
         save_config(config)
     elif choice == "change_pdf_path":
         config["pdf_path"] = prompt_for_path(config.get("pdf_path"), label="PDFs")
+        save_config(config)
+    elif choice == "change_whisper_model":
+        config["whisper_model"] = choose_whisper_model(config.get("whisper_model", DEFAULT_WHISPER_MODEL))
         save_config(config)
     elif choice == "clear_history":
         if Confirm.ask("[yellow]Clear scrape history? (will re-scrape everything next run)[/yellow]"):

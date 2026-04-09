@@ -7,6 +7,7 @@ cached word-level transcriptions, and mpv playback at specific timestamps.
 
 import json
 import re
+import signal
 import subprocess
 import shutil
 from pathlib import Path
@@ -18,6 +19,82 @@ from rich.table import Table
 
 console = Console()
 
+# ── Whisper model catalogue ───────────────────────────────────────────────────
+
+WHISPER_MODELS = [
+    # Standard models
+    {"name": "tiny",       "params": "39M",   "size": "~75 MB",  "ram": "~0.5 GB",    "speed": "4–5x real-time",     "accuracy": "Low",        "en_only": "tiny.en"},
+    {"name": "base",       "params": "74M",   "size": "~145 MB", "ram": "~0.5–1 GB",  "speed": "2–3x real-time",     "accuracy": "Fair",       "en_only": "base.en"},
+    {"name": "small",      "params": "244M",  "size": "~465 MB", "ram": "~1–2 GB",    "speed": "1–2x real-time",     "accuracy": "Good",       "en_only": "small.en"},
+    {"name": "medium",     "params": "769M",  "size": "~1.5 GB", "ram": "~2–4 GB",    "speed": "0.5–1x real-time",   "accuracy": "Very Good",  "en_only": "medium.en"},
+    {"name": "large-v1",   "params": "1.55B", "size": "~3 GB",   "ram": "~4–6 GB",    "speed": "0.2–0.5x real-time", "accuracy": "Excellent",  "en_only": None},
+    {"name": "large-v2",   "params": "1.55B", "size": "~3 GB",   "ram": "~4–6 GB",    "speed": "0.2–0.5x real-time", "accuracy": "Excellent",  "en_only": None},
+    {"name": "large-v3",   "params": "1.55B", "size": "~3 GB",   "ram": "~6–8 GB",    "speed": "0.2–0.5x real-time", "accuracy": "Best",       "en_only": None},
+    # Distil & Turbo models
+    {"name": "distil-small.en",  "params": "122M",  "size": "~250 MB", "ram": "~1 GB",     "speed": "3–4x real-time",     "accuracy": "Good",       "en_only": "EN only"},
+    {"name": "distil-medium.en", "params": "384M",  "size": "~750 MB", "ram": "~1.5–2 GB", "speed": "1.5–2.5x real-time", "accuracy": "Very Good",  "en_only": "EN only"},
+    {"name": "distil-large-v2",  "params": "756M",  "size": "~1.5 GB", "ram": "~2–3 GB",   "speed": "1.5–2x real-time",   "accuracy": "Excellent",  "en_only": "Multilingual"},
+    {"name": "distil-large-v3",  "params": "756M",  "size": "~1.5 GB", "ram": "~2–3 GB",   "speed": "2–3x real-time",     "accuracy": "Excellent",  "en_only": "Multilingual"},
+    {"name": "large-v3-turbo",   "params": "809M",  "size": "~1.6 GB", "ram": "~2–3 GB",   "speed": "3–5x real-time",     "accuracy": "Near-best",  "en_only": "Multilingual"},
+]
+
+WHISPER_MODEL_NAMES = [m["name"] for m in WHISPER_MODELS]
+DEFAULT_WHISPER_MODEL = "base"
+
+
+def show_model_table() -> None:
+    """Print the full model catalogue as a Rich table."""
+    table = Table(title="Available Whisper Models", header_style="bold magenta", padding=(0, 1))
+    table.add_column("#", style="dim", width=4)
+    table.add_column("Model", style="cyan bold")
+    table.add_column("Params", justify="right")
+    table.add_column("Download", justify="right")
+    table.add_column("RAM (CPU)", justify="right")
+    table.add_column("CPU Speed", justify="right")
+    table.add_column("Accuracy", style="green")
+    table.add_column("EN-only variant")
+
+    for i, m in enumerate(WHISPER_MODELS, 1):
+        table.add_row(
+            str(i),
+            m["name"],
+            m["params"],
+            m["size"],
+            m["ram"],
+            m["speed"],
+            m["accuracy"],
+            m["en_only"] or "✗",
+        )
+    console.print(table)
+
+
+def choose_whisper_model(current: str) -> str:
+    """Interactive model selector. Returns the chosen model name."""
+    console.print(f"\n[dim]Current model:[/dim] [bold cyan]{current}[/bold cyan]\n")
+    show_model_table()
+
+    raw = Prompt.ask(
+        "\n[bold]Select model number or name[/bold] [dim](or press Enter to keep current)[/dim]",
+        default="",
+    ).strip()
+
+    if not raw:
+        return current
+
+    # Accept by number
+    if raw.isdigit() and 1 <= int(raw) <= len(WHISPER_MODELS):
+        chosen = WHISPER_MODELS[int(raw) - 1]["name"]
+        console.print(f"[green]✓ Whisper model set to:[/green] [bold]{chosen}[/bold]")
+        return chosen
+
+    # Accept by name (exact or close)
+    if raw in WHISPER_MODEL_NAMES:
+        console.print(f"[green]✓ Whisper model set to:[/green] [bold]{raw}[/bold]")
+        return raw
+
+    console.print(f"[red]Unknown model: '{raw}'. Keeping {current}.[/red]")
+    return current
+
 
 # ── Transcription & Indexing ──────────────────────────────────────────────────
 
@@ -26,14 +103,26 @@ def _get_index_dir(audio_path: Path) -> Path:
     return audio_path / ".audio_index"
 
 
-def transcribe(audio_file: Path) -> list[dict]:
+# Module-level flag for graceful interrupt
+_interrupted = False
+
+
+def _handle_interrupt(signum, frame):
+    """Signal handler that sets the interrupt flag instead of raising."""
+    global _interrupted
+    _interrupted = True
+
+
+def transcribe(audio_file: Path, model_name: str = DEFAULT_WHISPER_MODEL) -> list[dict]:
     """Transcribe a single audio file and return a list of {word, start} dicts."""
     from faster_whisper import WhisperModel
 
-    model = WhisperModel("base", device="cpu", compute_type="int8")
+    model = WhisperModel(model_name, device="cpu", compute_type="int8")
     segments, _ = model.transcribe(str(audio_file), word_timestamps=True)
     words = []
     for segment in segments:
+        if _interrupted:
+            break
         if segment.words is None:
             continue
         for w in segment.words:
@@ -43,11 +132,15 @@ def transcribe(audio_file: Path) -> list[dict]:
     return words
 
 
-def index_audio_files(audio_path: Path, force: bool = False) -> int:
+def index_audio_files(audio_path: Path, force: bool = False, model_name: str = DEFAULT_WHISPER_MODEL) -> int:
     """
     Index all .mp3 files in audio_path. Skips already-indexed files unless force=True.
+    Handles Ctrl+C gracefully — saves progress and resumes on next run.
     Returns the number of newly indexed files.
     """
+    global _interrupted
+    _interrupted = False
+
     index_dir = _get_index_dir(audio_path)
     index_dir.mkdir(parents=True, exist_ok=True)
 
@@ -68,35 +161,68 @@ def index_audio_files(audio_path: Path, force: bool = False) -> int:
 
     console.print(
         f"\n[green]{len(mp3_files)} audio file(s) found.[/green] "
-        f"[yellow]{len(to_index)} to index.[/yellow]\n"
+        f"[yellow]{len(to_index)} to index.[/yellow]"
     )
+    console.print(f"[dim]Model: {model_name} — Press Ctrl+C at any time to stop safely.[/dim]\n")
 
     indexed = 0
     failed: list[str] = []
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        console=console,
-    ) as progress:
-        task = progress.add_task("[cyan]Indexing audio files...", total=len(to_index))
+    # Install our graceful interrupt handler
+    prev_handler = signal.signal(signal.SIGINT, _handle_interrupt)
 
-        for mp3 in to_index:
-            progress.update(task, description=f"[cyan]indexing: {mp3.name}")
-            try:
-                words = transcribe(mp3)
-                cache_file = index_dir / (mp3.stem + ".json")
-                with open(cache_file, "w") as f:
-                    json.dump(words, f)
-                indexed += 1
-            except Exception as e:
-                console.print(f"[red]  Failed to index {mp3.name}: {e}[/red]")
-                failed.append(mp3.name)
-            progress.advance(task)
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("[cyan]Indexing audio files...", total=len(to_index))
 
-    console.print(f"\n[bold green]✓ Indexed {indexed} audio file(s)[/bold green] → {index_dir}")
+            for mp3 in to_index:
+                if _interrupted:
+                    console.print(
+                        f"\n[bold yellow]⚠ Interrupted![/bold yellow] "
+                        f"Indexed {indexed}/{len(to_index)} file(s). "
+                        f"Run again to resume where you left off."
+                    )
+                    break
+
+                progress.update(task, description=f"[cyan]indexing: {mp3.name}")
+                try:
+                    words = transcribe(mp3, model_name=model_name)
+                    if _interrupted and not words:
+                        # Interrupted before any words were captured — don't write empty cache
+                        console.print(
+                            f"\n[bold yellow]⚠ Interrupted![/bold yellow] "
+                            f"Indexed {indexed}/{len(to_index)} file(s). "
+                            f"Run again to resume where you left off."
+                        )
+                        break
+                    cache_file = index_dir / (mp3.stem + ".json")
+                    with open(cache_file, "w") as f:
+                        json.dump(words, f)
+                    indexed += 1
+                    if _interrupted:
+                        # Finished the current file but user wants to stop
+                        console.print(
+                            f"\n[bold yellow]⚠ Interrupted after completing {mp3.name}.[/bold yellow] "
+                            f"Indexed {indexed}/{len(to_index)} file(s). "
+                            f"Run again to resume where you left off."
+                        )
+                        break
+                except Exception as e:
+                    console.print(f"[red]  Failed to index {mp3.name}: {e}[/red]")
+                    failed.append(mp3.name)
+                progress.advance(task)
+    finally:
+        # Restore the original signal handler
+        signal.signal(signal.SIGINT, prev_handler)
+
+    if not _interrupted:
+        console.print(f"\n[bold green]✓ Indexed {indexed} audio file(s)[/bold green] → {index_dir}")
     if failed:
         console.print(f"[yellow]Failed ({len(failed)}): {', '.join(failed)}[/yellow]")
 
@@ -170,7 +296,7 @@ def format_timestamp(seconds: float) -> str:
 # ── TUI flows (called from scrape_philosophize.py) ────────────────────────────
 
 def run_index_audio(config: dict) -> None:
-    """Menu Option 7 — Index audio files."""
+    """Menu Option 8 — Index audio files."""
     audio_path_str = config.get("audio_path")
     if not audio_path_str:
         console.print("[yellow]Audio path not set. Run option 6 first.[/yellow]")
@@ -181,7 +307,8 @@ def run_index_audio(config: dict) -> None:
         console.print(f"[yellow]Audio path does not exist: {audio_path}[/yellow]")
         return
 
-    index_audio_files(audio_path, force=False)
+    model_name = config.get("whisper_model", DEFAULT_WHISPER_MODEL)
+    index_audio_files(audio_path, force=False, model_name=model_name)
 
 
 def run_search_audio(config: dict) -> None:
@@ -209,8 +336,9 @@ def run_search_audio(config: dict) -> None:
         if not (index_dir / (mp3.stem + ".json")).exists()
     ]
     if unindexed:
+        model_name = config.get("whisper_model", DEFAULT_WHISPER_MODEL)
         console.print(f"\n[dim]Auto-indexing {len(unindexed)} new audio file(s)…[/dim]")
-        index_audio_files(audio_path, force=False)
+        index_audio_files(audio_path, force=False, model_name=model_name)
 
     results = search_audio(keyword, audio_path)
 

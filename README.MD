@@ -6,6 +6,18 @@ A polished, TUI-driven Python scraper that downloads every transcript from [Phil
 
 ---
 
+## 📸 Screenshots
+
+| Scraping in action | Keyword search results |
+|---|---|
+| ![Scraping](Screenshots/Scrape.png) | ![Plato Search](Screenshots/Plato%20Search.png) |
+
+| Scraped files list | Settings menu |
+|---|---|
+| ![List](Screenshots/List.png) | ![Settings](Screenshots/Path.png) |
+
+---
+
 ## ✨ Features
 
 - 🖥️ **Interactive TUI** — clean terminal menus powered by [Rich](https://github.com/Textualize/rich)
@@ -74,12 +86,15 @@ Enter your preferred path (or press Enter to accept the default). The directory 
 
 ### Main menu
 
+![Main menu and scrape run](Screenshots/Scrape.png)
+
 ```
 Main Menu
   1   Scrape new transcripts
   2   Settings / change save path
   3   Show scraped files
-  4   Exit
+  4   Search transcripts by keyword
+  5   Exit
 ```
 
 | Option | Description |
@@ -111,6 +126,8 @@ Option **4** in the main menu lets you search all previously scraped transcripts
 ```
 
 Episodes with zero mentions are excluded from the results.
+
+![Plato keyword search example](Screenshots/Plato%20Search.png)
 
 ---
 
@@ -164,6 +181,8 @@ Config is stored at `~/.philosophize_scraper.json` and is managed automatically 
 | `scraped` | List of episode slugs already downloaded — used to skip on future runs |
 
 To force a full re-scrape, either delete this file or use **Settings → Clear scrape history** from within the TUI.
+
+![Settings menu](Screenshots/Path.png)
 
 ---
 

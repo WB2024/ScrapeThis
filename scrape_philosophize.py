@@ -604,6 +604,8 @@ def prompt_for_path(current: str | None = None, label: str = "transcripts") -> s
             f"\n[bold]Enter the directory path to save {label}[/bold]",
             default=current or str(Path.home() / f"philosophize_{label}"),
         )
+        # Strip surrounding quotes the user may have pasted from a file manager
+        raw = raw.strip().strip("'\"")
         path = Path(raw).expanduser().resolve()
         try:
             path.mkdir(parents=True, exist_ok=True)

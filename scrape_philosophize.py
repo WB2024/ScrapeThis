@@ -13,15 +13,18 @@ import os
 import re
 import time
 import sys
+import webbrowser
 from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+from rich.rule import Rule
 from rich.table import Table
 from rich import print as rprint
 
@@ -490,6 +493,37 @@ def show_scraped_files(config: dict):
         console.print(f"  [dim]{i:>3}.[/dim] {slug}")
 
 
+def view_transcript(filepath: Path) -> None:
+    """Render a transcript .md file as formatted Markdown inside a Rich pager."""
+    try:
+        raw = filepath.read_text(encoding="utf-8")
+    except IOError as e:
+        console.print(f"[red]Could not read file: {e}[/red]")
+        return
+
+    # Strip YAML frontmatter block before rendering
+    body = re.sub(r"^---\n.*?\n---\n\n?", "", raw, count=1, flags=re.DOTALL)
+
+    # Extract podcast_url for a handy footer hint (may be empty / absent)
+    podcast_url = ""
+    m = re.search(r'^podcast_url:\s*"([^"]*)"', raw, re.MULTILINE)
+    if m:
+        podcast_url = m.group(1)
+
+    rendered = Markdown(body, hyperlinks=True)
+
+    hint = (
+        f"[dim]  Listening link:[/dim] {podcast_url}" if podcast_url
+        else "[dim]  No podcast audio link found for this episode.[/dim]"
+    )
+
+    with console.pager(styles=True):
+        console.print(Rule("[bold magenta]Philosophize This! — Transcript Viewer[/bold magenta]"))
+        console.print(rendered)
+        console.print(Rule())
+        console.print(hint)
+
+
 def search_transcripts(config: dict):
     """Keyword search across all scraped .md files, ranked by mention count."""
     save_path = Path(config.get("save_path", ""))
@@ -528,7 +562,7 @@ def search_transcripts(config: dict):
                 text = md_file.read_text(encoding="utf-8")
                 count = len(pattern.findall(text))
                 if count > 0:
-                    results.append({"file": md_file.stem, "count": count})
+                    results.append({"file": md_file.stem, "path": md_file, "count": count})
             except IOError:
                 pass
             progress.advance(task)
@@ -539,16 +573,59 @@ def search_transcripts(config: dict):
 
     results.sort(key=lambda x: x["count"], reverse=True)
 
-    console.print(
-        f"\n[bold green]'{keyword}' found in {len(results)} transcript(s):[/bold green]\n"
-    )
-    table = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 2))
-    table.add_column("#", style="dim", width=4)
-    table.add_column("Episode", style="cyan")
-    table.add_column("Mentions", justify="right", style="bold yellow")
-    for i, r in enumerate(results, 1):
-        table.add_row(str(i), r["file"], str(r["count"]))
-    console.print(table)
+    while True:
+        console.print(
+            f"\n[bold green]'{keyword}' found in {len(results)} transcript(s):[/bold green]\n"
+        )
+        table = Table(show_header=True, header_style="bold magenta", box=None, padding=(0, 2))
+        table.add_column("#", style="dim", width=4)
+        table.add_column("Episode", style="cyan")
+        table.add_column("Mentions", justify="right", style="bold yellow")
+        for i, r in enumerate(results, 1):
+            table.add_row(str(i), r["file"], str(r["count"]))
+        console.print(table)
+
+        raw = Prompt.ask(
+            "\n[bold]Select episode number[/bold] [dim](or press Enter to go back)[/dim]",
+            default="",
+        ).strip()
+
+        if not raw:
+            return
+
+        if not raw.isdigit() or not (1 <= int(raw) <= len(results)):
+            console.print(f"[red]Please enter a number between 1 and {len(results)}.[/red]")
+            continue
+
+        chosen = results[int(raw) - 1]
+
+        console.print(f"\n[bold]{chosen['file']}[/bold]")
+        action = Prompt.ask(
+            "What would you like to do?",
+            choices=["read", "listen", "back"],
+            default="read",
+        )
+
+        if action == "read":
+            view_transcript(chosen["path"])
+        elif action == "listen":
+            # Pull podcast_url from frontmatter of the file
+            try:
+                text = chosen["path"].read_text(encoding="utf-8")
+            except IOError:
+                console.print("[red]Could not read file.[/red]")
+                continue
+            m = re.search(r'^podcast_url:\s*"([^"]+)"', text, re.MULTILINE)
+            if m and m.group(1):
+                url = m.group(1)
+                console.print(f"[green]Opening in browser:[/green] {url}")
+                webbrowser.open(url)
+            else:
+                console.print(
+                    "[yellow]No podcast audio URL found for this transcript.\n"
+                    "Run option 5 (Enrich transcripts) to add podcast links.[/yellow]"
+                )
+        # "back" just loops back to the results table
 
 
 def run_scrape(config: dict) -> dict:

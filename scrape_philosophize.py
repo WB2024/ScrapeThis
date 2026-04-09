@@ -24,9 +24,6 @@ from markdownify import markdownify as md
 import markdown as markdown_lib
 from weasyprint import HTML as WeasyHTML
 
-import requests
-from bs4 import BeautifulSoup
-from markdownify import markdownify as md
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -36,6 +33,8 @@ from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 from rich import print as rprint
+
+from audio_search import run_index_audio, run_search_audio, get_index_count
 
 # ── Constants ────────────────────────────────────────────────────────────────
 BASE_URL = "https://www.philosophizethis.org"
@@ -743,6 +742,7 @@ def show_settings_menu(config: dict) -> dict:
     console.print(f"  PDF path        : [green]{config.get('pdf_path', 'Not set')}[/green]")
     console.print(f"  Scraped         : [cyan]{len(config.get('scraped', []))} transcripts[/cyan]")
     console.print(f"  Downloaded      : [cyan]{len(config.get('downloaded_audio', []))} audio files[/cyan]")
+    console.print(f"  Audio index     : [cyan]{get_index_count(config.get('audio_path'))} files indexed[/cyan]")
 
     choice = Prompt.ask(
         "\nWhat would you like to do?",
@@ -783,9 +783,11 @@ def main_menu(config: dict) -> str:
     table.add_row("[cyan]5[/cyan]", "Enrich transcripts with podcast links")
     table.add_row("[cyan]6[/cyan]", "Download all audio files")
     table.add_row("[cyan]7[/cyan]", "Generate PDFs from transcripts")
-    table.add_row("[cyan]8[/cyan]", "Exit")
+    table.add_row("[cyan]8[/cyan]", "Index audio files")
+    table.add_row("[cyan]9[/cyan]", "Search audio by keyword")
+    table.add_row("[cyan]10[/cyan]", "Exit")
     console.print(table)
-    return Prompt.ask("Choose", choices=["1", "2", "3", "4", "5", "6", "7", "8"], default="1")
+    return Prompt.ask("Choose", choices=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"], default="1")
 
 
 def show_scraped_files(config: dict):
@@ -1104,6 +1106,10 @@ def main():
         elif choice == "7":
             config = run_generate_pdfs(config)
         elif choice == "8":
+            run_index_audio(config)
+        elif choice == "9":
+            run_search_audio(config)
+        elif choice == "10":
             console.print("[dim]Goodbye![/dim]")
             sys.exit(0)
 

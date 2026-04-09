@@ -59,6 +59,14 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+**4. Install system packages** *(required for audio indexing & playback)*
+
+```bash
+sudo apt install ffmpeg mpv
+```
+
+> `ffmpeg` is needed by `faster-whisper` for audio decoding. `mpv` is used for timestamped playback. Both must be on your `PATH`.
+
 ---
 
 ## ▶️ Usage
@@ -94,16 +102,26 @@ Main Menu
   2   Settings / change save path
   3   Show scraped files
   4   Search transcripts by keyword
-  5   Exit
+  5   Enrich transcripts with podcast links
+  6   Download all audio files
+  7   Generate PDFs from transcripts
+  8   Index audio files
+  9   Search audio by keyword
+  10  Exit
 ```
 
 | Option | Description |
 |--------|-------------|
 | **1** | Crawl the index, find new transcripts, download & convert them |
-| **2** | Change save path or clear scrape history |
+| **2** | Change save path, audio path, PDF path, or clear history |
 | **3** | List all previously scraped episode slugs |
-| **4** | Search all scraped transcripts for a keyword |
-| **5** | Exit the program |
+| **4** | Search all scraped transcripts for a keyword (with read/listen actions) |
+| **5** | Enrich transcripts with podcast page links and episode titles |
+| **6** | Download all podcast audio files (.mp3) |
+| **7** | Generate PDF files from Markdown transcripts |
+| **8** | Index audio files for keyword search (uses Whisper speech-to-text) |
+| **9** | Search audio by keyword — find when a word is spoken, jump to it in mpv |
+| **10** | Exit the program |
 
 ---
 
@@ -130,7 +148,37 @@ Episodes with zero mentions are excluded from the results.
 ![Plato keyword search example](Screenshots/Plato%20Search.png)
 
 ---
+## 🔊 Audio Keyword Search
 
+Options **8** and **9** let you search through the *spoken word* in downloaded audio files.
+
+### How it works
+
+1. **Index audio files** (Option 8) — Transcribes each `.mp3` using [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (offline, runs locally). Word-level timestamps are cached as JSON files in a hidden `.audio_index` directory inside your audio path. Already-indexed files are skipped automatically.
+
+2. **Search audio by keyword** (Option 9) — Enter any keyword. The tool searches the cached index and returns a ranked table of episodes where the word appears, sorted by occurrence count. Select an episode to see every timestamp, then pick one to open `mpv` at that exact position (±2 seconds).
+
+> **First run note:** The Whisper `base` model (~145 MB) is downloaded automatically to `~/.cache/huggingface/hub` on the first index run. Subsequent runs are fully offline.
+
+```
+'stoicism' found in 3 audio file(s):
+
+  #   Episode                                         Occurrences
+  1   episode-008-the-stoics                                    12
+  2   episode-047-marcus-aurelius                                5
+  3   episode-031-epictetus                                      3
+
+Select episode number (or press Enter to go back): 1
+
+'stoicism' in episode-008-the-stoics.mp3 — 12 occurrence(s):
+
+  [  1]  00:02:14    [  2]  00:05:47    [  3]  00:09:03    [  4]  00:11:22
+
+Jump to which occurrence? (or press Enter to go back): 1
+Opening episode-008-the-stoics.mp3 at 00:02:14 in mpv...
+```
+
+---
 ## �📁 Output Format
 
 Each transcript is saved as an individual Markdown file named after the episode slug:
@@ -194,6 +242,9 @@ To force a full re-scrape, either delete this file or use **Settings → Clear s
 | [`beautifulsoup4`](https://www.crummy.com/software/BeautifulSoup/) | HTML parsing |
 | [`markdownify`](https://github.com/matthewwithanm/python-markdownify) | HTML → Markdown conversion |
 | [`rich`](https://github.com/Textualize/rich) | TUI, progress bars, styled output |
+| [`markdown`](https://python-markdown.github.io/) | Markdown → HTML conversion (for PDF generation) |
+| [`weasyprint`](https://weasyprint.org/) | HTML → PDF rendering |
+| [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) | Offline speech-to-text for audio indexing |
 
 > **Why not Scrapy?**  
 > Scrapy is a powerful framework but overkill for this task. The Philosophize This! website is server-rendered HTML with no JavaScript rendering required, so `requests` + `BeautifulSoup` is simpler, more readable, and easier to maintain.

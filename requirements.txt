@@ -4,3 +4,4 @@ markdownify==0.14.1
 rich==14.0.0
 markdown==3.10.2
 weasyprint==68.1
+faster-whisper==1.1.1
